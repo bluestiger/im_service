@@ -36,7 +36,7 @@ func (client *IMClient) Login() {
 	client.LoadOffline()
 	client.LoadGroupOffline()
 
-	SetUserUnreadCount(client.appid, client.uid, 0)
+	SetUserUnreadCount(client.appid, client.uid, client.bundle_id, 0)
 }
 
 func (client *IMClient) Logout() {
@@ -182,7 +182,7 @@ func (client *IMClient) HandleInputing(inputing *MessageInputing) {
 }
 
 func (client *IMClient) HandleUnreadCount(u *MessageUnreadCount) {
-	SetUserUnreadCount(client.appid, client.uid, u.count)
+	SetUserUnreadCount(client.appid, client.uid, client.bundle_id, u.count)
 }
 
 func (client *IMClient) HandleACK(ack *MessageACK) {

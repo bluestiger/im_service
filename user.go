@@ -32,7 +32,7 @@ func LoadUserAccessToken(token string) (int64, int64, string, error) {
 	key := fmt.Sprintf("access_token_%s", token)
 	var uid int64
 	var appid int64
-	var uname string
+	var bundle_id string
 
 	exists, err := redis.Bool(conn.Do("EXISTS", key))
 	if err != nil {
@@ -42,18 +42,18 @@ func LoadUserAccessToken(token string) (int64, int64, string, error) {
 		return 0, 0, "", errors.New("token non exists")
 	}
 
-	reply, err := redis.Values(conn.Do("HMGET", key, "user_id", "app_id", "user_name"))
+	reply, err := redis.Values(conn.Do("HMGET", key, "user_id", "app_id", "bundle_id"))
 	if err != nil {
 		log.Info("hmget error:", err)
 		return 0, 0, "", err
 	}
 
-	_, err = redis.Scan(reply, &uid, &appid, &uname)
+	_, err = redis.Scan(reply, &uid, &appid, &bundle_id)
 	if err != nil {
 		log.Warning("scan error:", err)
 		return 0, 0, "", err
 	}
-	return appid, uid, uname, nil	
+	return appid, uid, bundle_id, nil
 }
 
 func CountUser(appid int64, uid int64) {
@@ -80,13 +80,21 @@ func CountDAU(appid int64, uid int64) {
 	}
 }
 
-func SetUserUnreadCount(appid int64, uid int64, count int32) {
+func SetUserUnreadCount(appid int64, uid int64, bundle_id string, count int32) {
 	conn := redis_pool.Get()
 	defer conn.Close()
 
-	key := fmt.Sprintf("users_%d_%d", appid, uid)
-	_, err := conn.Do("HSET", key, "unread", count)
-	if err != nil {
-		log.Info("hset err:", err)
+	if bundle_id == "" {
+		key := fmt.Sprintf("users_%d_%d", appid, uid)
+		_, err := conn.Do("HSET", key, "unread", count)
+		if err != nil {
+			log.Info("hset err:", err)
+		}
+	} else {
+		key := fmt.Sprintf("users_%d_%d_%s", appid, uid, bundle_id)
+		_, err := conn.Do("HSET", key, "unread", count)
+		if err != nil {
+			log.Info("hset err:", err)
+		}
 	}
 }

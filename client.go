@@ -113,12 +113,6 @@ func (client *Client) SendLoginPoint() {
 	client.SendMessage(client.uid, msg)
 }
 
-func (client *Client) AuthToken(token string) (int64, int64, error) {
-	appid, uid, _, err := LoadUserAccessToken(token)
-	return appid, uid, err
-}
-
-
 func (client *Client) HandleAuthToken(login *AuthenticationToken, version int) {
 	if client.uid > 0 {
 		log.Info("repeat login")
@@ -126,7 +120,7 @@ func (client *Client) HandleAuthToken(login *AuthenticationToken, version int) {
 	}
 
 	var err error
-	client.appid, client.uid, err = client.AuthToken(login.token)
+	client.appid, client.uid, client.bundle_id, err = LoadUserAccessToken(login.token)
 	if err != nil {
 		log.Infof("auth token:%s err:%s", login.token, err)
 		msg := &Message{cmd: MSG_AUTH_STATUS, version:version, body: &AuthenticationStatus{1, 0}}
@@ -154,8 +148,8 @@ func (client *Client) HandleAuthToken(login *AuthenticationToken, version int) {
 	client.device_id = login.device_id
 	client.platform_id = login.platform_id
 	client.tm = time.Now()
-	log.Infof("auth token:%s appid:%d uid:%d device id:%s:%d", 
-		login.token, client.appid, client.uid, client.device_id, client.device_ID)
+	log.Infof("auth token:%s appid:%d uid:%d bundle id:%s device id:%s:%d", 
+		login.token, client.appid, client.uid, client.bundle_id, client.device_id, client.device_ID)
 
 	msg := &Message{cmd: MSG_AUTH_STATUS, version:version, body: &AuthenticationStatus{0, client.public_ip}}
 	client.wt <- msg
