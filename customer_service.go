@@ -119,8 +119,7 @@ func (cs *CustomerService) SetLastSellerID(appid, uid, store_id, seller_id int64
 
 	key := fmt.Sprintf("users_%d_%d_%d", appid, uid, store_id)
 
-	//24hour expire
-	_, err := conn.Do("SET", key, seller_id, "EX", 3600*24)
+	_, err := conn.Do("SET", key, seller_id)
 	if err != nil {
 		log.Error("get last seller id err:", err)
 		return
@@ -271,48 +270,8 @@ func (cs *CustomerService) Clear() {
 	}
 }
 
-func (cs *CustomerService) RunOnce() bool {
-	c, err := redis.Dial("tcp", config.redis_address)
-	if err != nil {
-		log.Info("dial redis error:", err)
-		return false
+func (cs *CustomerService) HandleMessage(v *redis.Message) {
+	if v.Channel == "store_update" {
+		cs.HandleUpdate(string(v.Data))
 	}
-	psc := redis.PubSubConn{c}
-	psc.Subscribe("store_update")
-	cs.Clear()
-	for {
-		switch v := psc.Receive().(type) {
-		case redis.Message:
-			if v.Channel == "store_update" {
-				cs.HandleUpdate(string(v.Data))
-			} else {
-				log.Infof("%s: message: %s\n", v.Channel, v.Data)
-			}
-		case redis.Subscription:
-			log.Infof("%s: %s %d\n", v.Channel, v.Kind, v.Count)
-		case error:
-			log.Info("error:", v)
-			return true
-		}
-	}
-}
-
-func (cs *CustomerService) Run() {
-	nsleep := 1
-	for {
-		connected := cs.RunOnce()
-		if !connected {
-			nsleep *= 2
-			if nsleep > 60 {
-				nsleep = 60
-			}
-		} else {
-			nsleep = 1
-		}
-		time.Sleep(time.Duration(nsleep) * time.Second)
-	}
-}
-
-func (cs *CustomerService) Start() {
-	go cs.Run()
 }

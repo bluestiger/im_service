@@ -24,6 +24,9 @@ import "flag"
 import "time"
 import "runtime"
 import "net/http"
+import "strings"
+import "strconv"
+import "sync/atomic"
 import "github.com/garyburd/redigo/redis"
 import log "github.com/golang/glog"
 
@@ -66,7 +69,7 @@ func ListenClient() {
 	Listen(handle_client, config.port)
 }
 
-func NewRedisPool(server, password string) *redis.Pool {
+func NewRedisPool(server, password string, db int) *redis.Pool {
 	return &redis.Pool{
 		MaxIdle:     100,
 		MaxActive:   500,
@@ -78,6 +81,12 @@ func NewRedisPool(server, password string) *redis.Pool {
 			}
 			if len(password) > 0 {
 				if _, err := c.Do("AUTH", password); err != nil {
+					c.Close()
+					return nil, err
+				}
+			}
+			if db > 0 && db < 16 {
+				if _, err := c.Do("SELECT", db); err != nil {
 					c.Close()
 					return nil, err
 				}
@@ -184,15 +193,15 @@ func SendAppMessage(amsg *AppMessage, uid int64) bool {
 		log.Warningf("can't dispatch app message, appid:%d uid:%d cmd:%s", amsg.appid, amsg.receiver, Command(amsg.msg.cmd))
 		return false
 	}
-	if clients != nil {
-		for c, _ := range(clients) {
-			if amsg.msgid > 0 {
-				c.ewt <- &EMessage{msgid:amsg.msgid, msg:amsg.msg}
-			} else {
-				c.wt <- amsg.msg
-			}
+
+	for c, _ := range(clients) {
+		if amsg.msgid > 0 {
+			c.EnqueueEMessage(&EMessage{msgid:amsg.msgid, msg:amsg.msg})
+		} else {
+			c.EnqueueMessage(amsg.msg)
 		}
 	}
+
 	return true
 }
 
@@ -234,9 +243,9 @@ func DispatchAppMessage(amsg *AppMessage) {
 		}
 
 		if amsg.msgid > 0 {
-			c.ewt <- &EMessage{msgid:amsg.msgid, msg:amsg.msg}
+			c.EnqueueEMessage(&EMessage{msgid:amsg.msgid, msg:amsg.msg})
 		} else {
-			c.wt <- amsg.msg
+			c.EnqueueMessage(amsg.msg)
 		}
 	}
 }
@@ -252,7 +261,7 @@ func DispatchRoomMessage(amsg *AppMessage) {
 		return
 	}
 	for c, _ := range(clients) {
-		c.wt <- amsg.msg
+		c.EnqueueMessage(amsg.msg)
 	}	
 }
 
@@ -276,19 +285,17 @@ func DispatchGroupMessage(amsg *AppMessage) {
 		if len(clients) == 0 {
 			continue
 		}
-		 
-		if clients != nil {
-			for c, _ := range(clients) {
-				if amsg.msg.cmd == MSG_GROUP_IM {
-					im := amsg.msg.body.(*IMMessage)
-					
-					//不再发送给发送者所在的设备
-					if c.uid == im.sender && c.device_ID == amsg.device_id {
-						continue
-					}
+
+		for c, _ := range(clients) {
+			if amsg.msg.cmd == MSG_GROUP_IM {
+				im := amsg.msg.body.(*IMMessage)
+				
+				//不再发送给发送者所在的设备
+				if c.uid == im.sender && c.device_ID == amsg.device_id {
+					continue
 				}
-				c.ewt <- &EMessage{msgid:amsg.msgid, msg:amsg.msg}
 			}
+			c.EnqueueEMessage(&EMessage{msgid:amsg.msgid, msg:amsg.msg})
 		}
 	}
 }
@@ -344,6 +351,99 @@ func StartHttpServer(addr string) {
 	HTTPService(addr, handler)
 }
 
+func HandleForbidden(data string) {
+	arr := strings.Split(data, ",")
+	if len(arr) != 3 {
+		log.Info("message error:", data)
+		return
+	}
+	appid, err := strconv.ParseInt(arr[0], 10, 64)
+	if err != nil {
+		log.Info("error:", err)
+		return
+	}
+	uid, err := strconv.ParseInt(arr[1], 10, 64)
+	if err != nil {
+		log.Info("error:", err)
+		return
+	}
+	fb, err := strconv.ParseInt(arr[2], 10, 64)
+	if err != nil {
+		log.Info("error:", err)
+		return
+	}
+
+	route := app_route.FindRoute(appid)
+	if route == nil {
+		log.Warningf("can't find appid:%d route", appid)
+		return
+	}
+	clients := route.FindClientSet(uid)
+	if len(clients) == 0 {
+		return
+	}
+
+	log.Infof("forbidden:%d %d %d client count:%d", 
+		appid, uid, fb, len(clients))
+	for c, _ := range(clients) {
+		atomic.StoreInt32(&c.forbidden, int32(fb))
+	}
+}
+
+func SubscribeRedis() bool {
+	c, err := redis.Dial("tcp", config.redis_address)
+	if err != nil {
+		log.Info("dial redis error:", err)
+		return false
+	}
+
+	password := config.redis_password
+	if len(password) > 0 {
+		if _, err := c.Do("AUTH", password); err != nil {
+			c.Close()
+			return false
+		}
+	}
+
+	psc := redis.PubSubConn{c}
+	psc.Subscribe("store_update", "speak_forbidden")
+
+	customer_service.Clear()
+	for {
+		switch v := psc.Receive().(type) {
+		case redis.Message:
+			log.Infof("%s: message: %s\n", v.Channel, v.Data)
+			if v.Channel == "store_update" {
+				customer_service.HandleMessage(&v)
+			} else if v.Channel == "speak_forbidden" {
+				HandleForbidden(string(v.Data))
+			}
+		case redis.Subscription:
+			log.Infof("%s: %s %d\n", v.Channel, v.Kind, v.Count)
+		case error:
+			log.Info("error:", v)
+			return true
+		}
+	}
+}
+
+func ListenRedis() {
+	nsleep := 1
+	for {
+		connected := SubscribeRedis()
+		if !connected {
+			nsleep *= 2
+			if nsleep > 60 {
+				nsleep = 60
+			}
+		} else {
+			nsleep = 1
+		}
+		time.Sleep(time.Duration(nsleep) * time.Second)
+	}
+}
+
+
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -357,14 +457,17 @@ func main() {
 	log.Infof("port:%d redis address:%s\n",
 		config.port,  config.redis_address)
 
+	log.Infof("redis address:%s password:%s db:%d\n", 
+		config.redis_address, config.redis_password, config.redis_db)
+
 	log.Info("storage addresses:", config.storage_addrs)
 	log.Info("route addressed:", config.route_addrs)
 	log.Info("kefu appid:", config.kefu_appid)
 	
 	customer_service = NewCustomerService()
-	customer_service.Start()
 
-	redis_pool = NewRedisPool(config.redis_address, "")
+	redis_pool = NewRedisPool(config.redis_address, config.redis_password, 
+		config.redis_db)
 
 	storage_pools = make([]*StorageConnPool, 0)
 	for _, addr := range(config.storage_addrs) {
@@ -398,6 +501,8 @@ func main() {
 	group_manager = NewGroupManager()
 	group_manager.observer = IMGroupObserver(0)
 	group_manager.Start()
+
+	go ListenRedis()
 
 	StartHttpServer(config.http_listen_address)
 

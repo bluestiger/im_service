@@ -25,6 +25,21 @@ import log "github.com/golang/glog"
 import "github.com/garyburd/redigo/redis"
 import "errors"
 
+func GetUserForbidden(appid int64, uid int64) (int, error) {
+	conn := redis_pool.Get()
+	defer conn.Close()
+
+	key := fmt.Sprintf("users_%d_%d", appid, uid)
+
+	forbidden, err := redis.Int(conn.Do("HGET", key, "forbidden"))
+	if err != nil {
+		log.Info("hget error:", err)
+		return 0,  err
+	}
+
+	return forbidden, nil
+}
+
 func LoadUserAccessToken(token string) (int64, int64, string, error) {
 	conn := redis_pool.Get()
 	defer conn.Close()
@@ -39,7 +54,7 @@ func LoadUserAccessToken(token string) (int64, int64, string, error) {
 		return 0, 0, "", err
 	}
 	if !exists {
-		return 0, 0, "", errors.New("token non exists")
+		return 0, 0,  "", errors.New("token non exists")
 	}
 
 	reply, err := redis.Values(conn.Do("HMGET", key, "user_id", "app_id", "bundle_id"))
@@ -53,6 +68,7 @@ func LoadUserAccessToken(token string) (int64, int64, string, error) {
 		log.Warning("scan error:", err)
 		return 0, 0, "", err
 	}
+
 	return appid, uid, bundle_id, nil
 }
 
